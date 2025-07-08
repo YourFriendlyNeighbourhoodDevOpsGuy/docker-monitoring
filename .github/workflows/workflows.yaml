@@ -4,14 +4,7 @@ on:
   push:
     branches: [ main ]
 
-env:
-  REGION: ${{ secrets.AWS_REGION }}
-  REPO_NAME: ${{ secrets.ECR_REPOSITORY }}
-  ACCOUNT_ID: ${{ secrets.ECR_ACCOUNT_ID }}
-  ECR_URI: ${{ secrets.ECR_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}
-
 jobs:
-
   build_and_push:
     name: Build and Push to ECR
     runs-on: ubuntu-latest
@@ -27,16 +20,25 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ secrets.AWS_REGION }}
 
+    - name: Set ECR URI as environment variable
+      run: echo "ECR_URI=${{ secrets.ECR_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}" >> $GITHUB_ENV
+
+    - name: Provision SES Identities
+      run: terraform apply -auto-approve
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
     - name: Login to Amazon ECR
       run: |
-        aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ECR_URI
+        aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+        | docker login --username AWS --password-stdin $ECR_URI
 
     - name: Build and Push Docker Image
       run: |
-        docker build -t $REPO_NAME .
-        docker tag $REPO_NAME:latest $ECR_URI:latest
+        docker build -t ${{ secrets.ECR_REPOSITORY }} .
+        docker tag ${{ secrets.ECR_REPOSITORY }}:latest $ECR_URI:latest
         docker push $ECR_URI:latest
-
 
   deploy:
     name: Deploy to EC2 from ECR
@@ -44,17 +46,18 @@ jobs:
     needs: build_and_push
 
     steps:
-    - name: Deploy via SSH
+
+    - name: SSH into EC2 and deploy
       run: |
-        ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+        ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
           REGION="${{ secrets.AWS_REGION }}"
           REPO_NAME="${{ secrets.ECR_REPOSITORY }}"
           ECR_URI="${{ secrets.ECR_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}"
 
-          # Login to ECR
+          # Authenticate to ECR
           aws ecr get-login-password --region \$REGION | docker login --username AWS --password-stdin \$ECR_URI
 
-          # Pull image
+          # Pull latest image
           docker pull \$ECR_URI:latest
 
           # Stop existing container
